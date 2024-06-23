@@ -48,6 +48,57 @@ __all__ = (
     "SCDown",
 )
 
+from mamba_ssm import Mamba
+
+
+# 定义一个名为MambaLayer的神经网络层，继承自nn.Module
+class MambaLayer(nn.Module):
+    def __init__(self, input_dim, output_dim, d_state=16, d_conv=4, expand=2):
+        super().__init__()  # 调用父类nn.Module的初始化方法
+        self.input_dim = input_dim  # 输入数据的维度
+        self.output_dim = output_dim  # 输出数据的维度
+        self.norm = nn.LayerNorm(input_dim)  # 层归一化
+
+        # 初始化Mamba层，这是一个自定义的SSM模型层
+        self.mamba = Mamba(
+            d_model=input_dim,  # 模型维度
+            d_state=d_state,  # SSM状态扩展因子
+            d_conv=d_conv,  # 局部卷积的宽度
+            expand=expand,  # 块扩展因子
+        )
+        self.proj = nn.Linear(input_dim, output_dim)  # 线性投影层
+        self.skip_scale = nn.Parameter(torch.ones(1))  # 残差连接的缩放参数，初始化为1
+
+    def forward(self, x):
+        # 获取输入数据的批次大小和通道数
+        B, C = x.shape[:2]
+        assert C == self.input_dim  # 确保输入数据的通道数与定义的input_dim一致
+
+        # 计算x中除了批次大小和通道数之外的元素总数，用于展平操作
+        n_tokens = x.shape[2:].numel()
+
+        # 获取输入数据的图像维度
+        img_dims = x.shape[2:]
+
+        # 将x展平，并在通道和元素总数之间进行转置，以准备进行SSM处理
+        x_flat = x.reshape(B, C, n_tokens).transpose(-1, -2)
+
+        # 对展平后的数据进行层归一化
+        x_norm = self.norm(x_flat)
+
+        # 通过Mamba层进行处理，并添加残差连接
+        x_mamba = self.mamba(x_norm) + torch.as_tensor(self.skip_scale * x_flat, dtype=x.dtype)
+
+        # 对Mamba层的输出进行层归一化
+        x_mamba = self.norm(x_mamba)
+
+        # 通过线性投影层进行降维或升维操作
+        x_mamba = self.proj(x_mamba)
+
+        # 将处理后的数据重新恢复为原始的形状，并返回
+        out = x_mamba.transpose(-1, -2).reshape(B, self.output_dim, *img_dims)
+        return out
+
 
 class DFL(nn.Module):
     """
@@ -231,7 +282,7 @@ class C2f(nn.Module):
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+        self.m = nn.ModuleList(MambaLayer(self.c, self.c,) for _ in range(n))
 
     def forward(self, x):
         """Forward pass through C2f layer."""
@@ -244,6 +295,7 @@ class C2f(nn.Module):
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
 
 
 class C3(nn.Module):
