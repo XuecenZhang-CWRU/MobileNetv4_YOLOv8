@@ -325,21 +325,33 @@ class DetectionModel(BaseModel):
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            s = 256  # 2x min stride
+        if isinstance(m, (Detect, Segment, Pose, OBB)):
+            s = 640  # 2x min stride
             m.inplace = self.inplace
-
-            def _forward(x):
-                """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
-                if self.end2end:
-                    return self.forward(x)["one2many"]
-                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
-
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+            self.model.to(torch.device('cuda'))
+            print('ch', ch)
+            forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+            m.stride = torch.tensor(
+                [s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s).to(torch.device('cuda')))]).cpu()  # forward
+            self.model.cpu()
             self.stride = m.stride
             m.bias_init()  # only run once
-        else:
-            self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
+
+        # if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+        #     s = 256  # 2x min stride
+        #     m.inplace = self.inplace
+        #
+        #     def _forward(x):
+        #         """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
+        #         if self.end2end:
+        #             return self.forward(x)["one2many"]
+        #         return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+        #
+        #     m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+        #     self.stride = m.stride
+        #     m.bias_init()  # only run once
+        # else:
+        #     self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
 
         # Init weights, biases
         initialize_weights(self)
